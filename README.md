@@ -6,7 +6,7 @@
 - 多层残差模型（最终实现）
 
 ## 〇、模型基类 Layer
-所有层和模型的基类，负责模型(层)固有的属性，并负责训练监控
+所有层和模型的基类，实现模型(层)固有的属性，并负责训练监控
 不负责 train 策略和 solve 求解参数过程
 规定子类模型必须实现的函数，规定部分函数必须执行的操作
 
@@ -17,20 +17,24 @@
 - device ("cuda:0")
 
 ### 0.2 数据形状参数 `set_shape`
-- 方法一：传入 m, d, k
-- 方法二：使用 **kwargs 传递字典
+决定了 § 0.3 模型参数的维度, 并与 § 0.6 训练数据的形状一致
+`set_shape` 使用 **kwargs 传递字典，可选参数有：
+- m
+- d
+- k
+- depth
+- e
 
-决定了 0.3 模型参数的维度, 并与 0.6 训练数据的形状一致
 
 ### 0.3 模型参数 `set_self`
-**子类必须实现 `set_self()`**
+**子类必须实现 `set_self()`**，可选参数有
 - `self.A`
 - `self.W`
 - `self.A_l`
 - `self.W_l`
-- `self.head` 应在初始化过程中绑定，因为 solve 要用到
-
-**以上 0.1 - 0.3 由 init 调用，init 也必须实现这些操作**
+- `self.head` Layer初始化过程中应绑定，因为 solve 要用到
+- `self.block`
+- `self.blocks`
 
 ### 0.4 规定前向过程
 - **子类必须实现 `forward`**
@@ -43,7 +47,7 @@
 - conv
 
 ### 0.6 训练数据参数 `set_data`
-模型暂存它们用于监控训练过程，由于 Python 的赋值操作是浅拷贝，因此不会产生额外内存开销
+模型暂存它们用于监控训练过程，由于 Python 的赋值操作是浅拷贝（传递引用），因此不会产生额外内存开销
 - feature_map，可以是以下值
     - X
     - Z_prev
@@ -61,17 +65,14 @@
 
 检查收敛性 `_check_conv`
 - 只能在类内部 train 过程中使用
-- Input：通常由 `set_data` 指定 X，Y
+- Input：通常由 `set_data` 指定，调用时不传参
 - Inter：
     - 调用 `test` 方法
     - 更新 loss，acc，conv
 - Output：conv
 
-**以上 0.5 - 0.7 由 train 调用**
-
-
 ### 0.8 函数传入的参数
-不保存在模型中，作用域只在调用函数内部的被传参数
+不保存在模型中，作用域只在函数内部的被传参数
 - max_iter
 - Y_res
 
@@ -88,7 +89,8 @@
     - set_check
     - set_data
     - _check_conv
-- `train` 中还可以调用 test
+- `train` 可以调用 
+    - test
 
 
 ## 一、残差层 ResidualLayer
@@ -124,14 +126,12 @@ output
 - $Z^l$ → `Z`
 
 
-### 2. 模型结构
-初始化 `init`
+### 2. 前向过程
+初始化 `__init__`
 - 按基类 `Layer` 规定，应调用`set_layer`,`set_shape`, `set_self`
 - 并且，由于中间层绑定分类头，在初始化时要传入分类头引用 `self.head`
 
-
-### 3. 前向过程
-按基类 `Layer` 规定，必须实现 `forward`
+前向过程 `forward`
 - 提取特征图 `forward_feature()`
     - input: `Z_prev`
     - output: `Z = Z_prev + A_l | Z_prev W_l|_+`
@@ -141,7 +141,7 @@ output
     - output: `Y_pred = A Z W`
 - 令 `forward` 为 `forward_feature()`
 
-### 4. 训练过程 *(Optional)*
+### 3. 训练过程 *(Optional)*
 - 使用真实标签 Y_true 进行模型训练 `train_label`
     - input: `Z_prev`, `Y_true`
     - inter: 
@@ -205,25 +205,16 @@ inter
 - $Z$ → `Z`
 
 
-### 2. 模型结构
+### 2. 前向过程
 - 初始化 `init`
     - `self.head`、`self.block`
 
-### 3. 前向过程
 - 完整前向过程 `forward`
     - input: `X（data）`
     - inter: `Z = block.forward_feature(X)`
     - output: `Y_pred = head.forward(Z)`
-- 计算 loss 和 acc 值 `test`
-    - input *(Optional)*: `X`, `Y`
-    - inter: `Y_pred = forward()`
-    - output: `loss, acc`
-- 对比 loss 和 acc 差异 `_check_conv`
-    - input *(Optional)*: `X`, `Y_true`
-    - inter: `loss, acc = test()`
-    - output: `conv`
 
-3. 训练过程
+### 3. 训练过程
 - 外层训练 `train_outer`
     - input：`X`, `Y_true`
     - inter：`head.train()`, `block.train()`
@@ -232,34 +223,87 @@ inter
     - input：`X`, `Y_true`
     - inter: 
         ```python
-        head.W = head.solve_W()
-        head.A = head.solve_A()
-        block.A_l = block.solve_A_l()
-        block.W_l = block.solve_W_l()
+        loop:
+            head.W = head.solve_W()
+            head.A = head.solve_A()
+            block.A_l = block.solve_A_l()
+            block.W_l = block.solve_W_l()
         ```
     - No output
 
 ## 三、多层残差模型 MultiResidualLayerModel
-### 3.1 定义接口
-1) 模型结构
-- 初始化 `init`
-    - head: `ClassifierHead`
-    - blocks: `list[ResidualLayer]`
+### 1. 数学公式
+模型优化目标：
+$$
+\begin{aligned}
+L &= \min \| A Z W - Y \|_F^2 \\
+&= \min \left\| A \left( X + \sum_{l=1}^{L} Z^l \right) W - Y \right\|_F^2 \\
+&= \min \left\| A \left( X + \sum_{l=1}^{L} A^l \left| Z^{l-1} W^l \right|_+ \right) W - Y \right\|_F^2 \\
+&= \min \left\| A \left( X + A^1 \left| X W^1 \right|_+ + A^2 \left| Z^1 W^2 \right|_+ + \cdots + A^l \left| Z^{l-1} W^l \right|_+ + \cdots + A^L \left| Z^{L-1} W^L \right|_+ \right) W - Y \right\|_F^2 \\
+\end{aligned}
+$$
 
-2) 前向过程
-- 获取特征图 `forward_features`
-- 完整前向过程 `forward`
-- 计算 loss 和 acc 值 `test`
-- 对比 loss 和 acc 差异 `_check_conv`
+变量定义：
+- 已知项
+    - X：输入数据
+    - Y：真实标签
+- 模型参数
+    - head.A：分类头池化层
+    - head.W：分类头线性层
+    - layer_l.A_l：残差层 CrossPatch 特征提取
+    - layer_l.W_l：残差层 CrossChannel 特征提取
+- 中间变量
+    - Z_0 = X：原始数据，第 1 层输入特征图，分类头输入特征图之一
+    - Z_(l-1)：第 l-1 层输出特征图，第 l 层输入特征图, `Z_prev`
+    - Z：所有(残差)特征图之和，分类头输入
 
-3. 训练策略
-- 逐层收敛训练 `train_list`
-    - 调用 head.train
-    - 调用 layer.train
-- 调用内层训练 `train_lin`
+残差层优化目标：
+$$
+L = \min \left\| A \left( Z^{l-1} + A^l \left| Z^{l-1} W^l \right|_+ \right) W - Y \right\|_F^2 \\
+$$
 
-#
-#
-#
+变量定义：
+- 外部值
+    - $Y$ → `Y_true`
+- 中间变量
+    - $A$ → `head.A`
+    - $W$ → `head.W`
+    - $Z^{l-1}$ → `Z_prev`
+- 残差层参数
+    - $A^l$ → `layer_l.A_l`
+    - $W^l$ → `layer_l.W_l`
+
+### 2. 前向过程
+模型规定，必须实现下面的方法：
+- `set_self`
+    - self.head: `ClassifierHead`
+    - self.blocks: `list[ResidualLayer]`
+- `forward`
+    - input: Z = X
+    - inter: Z = blk(Z) for blk in self.blocks
+    - output: Y_pred = self.head(X)
+
+### 3. 训练过程
+- `train_outer`: pass
+- `train_lin`:
+线性训练各层：
+每层训练：{solve_A, solve_W, solve_A_l, solve_W_l}, solve_A, solve_W
+    ```
+    Z = X   # 初始化特征图
+    for blk in self.blocks:
+        Z_prev = Z
+        loop:
+            trainhead: 
+                - Z = blk.forward(Z_prev)
+                - solve_A, solve_W
+            trainlayer: 
+                - 自动传递引用，不必赋值
+                - solve_A_l, solve_W_l 
+            同步检查：_check_conv, test, break if conv
+        - Z = blk.forward(Z_prev)   # 当前层训练完成，更新特征图
+        - solve_A, solve_W  # 可选训练
+    solve_A, solve_W  # 全部层训练完成，最终训练分类头
+    ```
+    代码中同时监控 loss 变化
 
 ## 五、进阶模型，不使用 $Z^0 = X$
